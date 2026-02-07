@@ -6,7 +6,13 @@ import os
 import sys
 from typing import Tuple
 from dotenv import load_dotenv
-import ollama
+
+try:
+    import ollama
+except ImportError as e:
+    print(f"❌ Error: Could not import ollama package: {e}")
+    print("   Please install it: pip install ollama")
+    sys.exit(1)
 
 # Load environment variables
 load_dotenv()
@@ -15,10 +21,14 @@ load_dotenv()
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:1b")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
+# Set OLLAMA_HOST environment variable for the ollama library
+if OLLAMA_HOST != "http://localhost:11434":
+    os.environ["OLLAMA_HOST"] = OLLAMA_HOST
+
 # Configure Ollama client
 try:
     # Test connection to Ollama server
-    ollama.list(host=OLLAMA_HOST)
+    ollama.list()
     print(f"✅ Successfully connected to Ollama server at {OLLAMA_HOST}")
 except Exception as e:
     print(f"❌ Error: Could not connect to Ollama server at {OLLAMA_HOST}")
@@ -32,7 +42,7 @@ except Exception as e:
 # Verify model is available
 model_available = False
 try:
-    models_response = ollama.list(host=OLLAMA_HOST)
+    models_response = ollama.list()
     # Handle different response structures
     if isinstance(models_response, dict):
         models_list = models_response.get('models', [])
@@ -92,8 +102,7 @@ SUMMARY: [exactly 5 words describing caller's intent]
         print("\n📤 Sending request to Gemma via Ollama...")
         response = ollama.generate(
             model=OLLAMA_MODEL,
-            prompt=prompt,
-            host=OLLAMA_HOST
+            prompt=prompt
         )
         # Handle response structure - could be dict or generator
         if isinstance(response, dict):
