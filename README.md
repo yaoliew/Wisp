@@ -3,14 +3,13 @@ intent-based AI call filter
 
 ## Overview
 
-Wisp is an AI-first call-screening service that uses Gemini 2.5 Flash-Lite to analyze incoming calls and automatically filter out scams while safely routing legitimate calls. The service is fully Retell-native, using Retell AI for call orchestration, SMS alerts, and telephony infrastructure.
+Wisp is an AI-first call-screening service that uses Gemini 2.5 Flash-Lite to analyze incoming calls and automatically filter out scams while safely routing legitimate calls. The service is fully Retell-native, using Retell AI for call orchestration and telephony infrastructure.
 
 ## Architecture
 
 - **Orchestration:** Retell AI (using ElevenLabs Voice)
 - **AI Brain:** Gemini 2.5 Flash-Lite (Google SDK via Retell Custom Tool)
-- **Telephony:** Retell AI (phone numbers, call routing, SMS)
-- **SMS:** Retell AI Chat API
+- **Telephony:** Retell AI (phone numbers, call routing)
 - **Webhooks:** Retell call event webhooks for real-time monitoring
 
 ## Setup Instructions
@@ -32,7 +31,6 @@ cp .env.example .env
 Edit `.env` with your credentials:
 - `GEMINI_API_KEY`: Your Google Gemini API key
 - `RETELL_API_KEY`: Your Retell AI API key
-- `RETELL_AGENT_ID`: Your Retell AI agent ID (for SMS)
 - `RETELL_WEBHOOK_SECRET`: Your Retell webhook secret (for webhook verification, optional but recommended)
 
 ### 3. Start the FastAPI Server
@@ -156,7 +154,6 @@ Root endpoint with API information.
 2. Gemini analyzes and returns verdict + 5-word summary
 3. If **SCAM:**
    - Retell terminates the call (with retry logic)
-   - Retell SMS API sends alert: `🚨 Wisp Blocked: [Summary].`
    - Webhook receives `call_ended` event
 
 ### SAFE Call Flow
@@ -166,7 +163,6 @@ Root endpoint with API information.
 3. If **SAFE:**
    - Retell initiates warm transfer to your phone number
    - Whisper message plays: `"Wisp here. Verified: [Summary]. Press any key to bridge."`
-   - Retell SMS API sends alert: `✅ Wisp Verified: [Summary]. Ringing you now.`
    - Webhook receives `call_transferred` event
 
 ## Development
@@ -211,11 +207,9 @@ curl -X POST http://localhost:8000/wisp-screen \
 
 - **ngrok URL not working:** Make sure ngrok is running and the URL is HTTPS (not HTTP)
 - **Retell not connecting:** Verify the Custom Tool URL matches your ngrok URL exactly
-- **SMS not sending:** Check Retell API key and agent ID. Ensure SMS is enabled for your Retell agent
 - **Webhook not receiving events:** Verify webhook URL in Retell dashboard and check ngrok is running
 - **Webhook signature verification failing:** Ensure `RETELL_WEBHOOK_SECRET` matches the secret in Retell dashboard
 - **Calls not routing:** Verify your Retell phone number is properly configured and assigned to your agent
-- **Agent ID not found:** Get your agent ID from Retell dashboard under Agent settings
 
 ## License
 

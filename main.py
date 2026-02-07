@@ -1,7 +1,7 @@
 """
 Wisp - AI-first call-screening service backend
 Fully Retell-native FastAPI backend for screening calls using Gemini 2.5 Flash-Lite
-Integrates with Retell AI for call orchestration, SMS, and webhooks
+Integrates with Retell AI for call orchestration and webhooks
 """
 import os
 import logging
@@ -9,14 +9,13 @@ import hmac
 import hashlib
 import asyncio
 import json
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Request, Header
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-import google.generativeai as genai
 import httpx
-from enum import Enum
 from datetime import datetime
+from screening import analyze_with_gemini, Verdict
 
 # Load environment variables
 load_dotenv()
@@ -32,31 +31,13 @@ app = FastAPI(title="Wisp Call Screening API", version="1.0.0")
 active_calls: Dict[str, Dict[str, Any]] = {}
 
 # Environment variables
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
-RETELL_AGENT_ID = os.getenv("RETELL_AGENT_ID")
 RETELL_WEBHOOK_SECRET = os.getenv("RETELL_WEBHOOK_SECRET")
 WISP_PHONE = "+14702282477"
 
 # Validate required environment variables
-if not all([GEMINI_API_KEY, RETELL_API_KEY, RETELL_AGENT_ID]):
+if not RETELL_API_KEY:
     logger.warning("Missing required environment variables. Please check your .env file.")
-
-# Configure Gemini
-genai.configure(api_key=GEMINI_API_KEY)
-
-# Initialize Gemini model (2.0 Flash-Lite)
-try:
-    model = genai.GenerativeModel('gemini-2.0-flash-exp')
-except Exception as e:
-    logger.warning(f"Could not initialize Gemini model: {e}. Using fallback model.")
-    model = genai.GenerativeModel('gemini-pro')
-
-
-class Verdict(str, Enum):
-    """Call verdict types"""
-    SCAM = "SCAM"
-    SAFE = "SAFE"
 
 
 class ScreeningRequest(BaseModel):
@@ -113,71 +94,6 @@ def verify_retell_webhook(payload: bytes, signature: str) -> bool:
         return False
 
 
-async def analyze_with_gemini(transcript: str) -> Tuple[Verdict, str]:
-    """
-    Analyze call transcript with Gemini 2.0 Flash-Lite
-    Returns: (verdict, 5-word_summary)
-    """
-    prompt = f"""You are a call screening AI. Analyze the following call transcript and determine if it's a SCAM or SAFE call.
-
-Call Transcript:
-{transcript}
-
-Instructions:
-1. Determine if this is a SCAM or SAFE call based on the caller's intent and behavior.
-2. Provide a verdict: SCAM or SAFE
-3. Provide a 5-word summary of the caller's intent (exactly 5 words, no more, no less).
-
-Respond in this exact format:
-VERDICT: [SCAM or SAFE]
-SUMMARY: [exactly 5 words describing caller's intent]
-"""
-
-    try:
-        response = model.generate_content(prompt)
-        response_text = response.text.strip()
-        
-        # Parse response
-        verdict = None
-        summary = None
-        
-        for line in response_text.split('\n'):
-            if line.startswith('VERDICT:'):
-                verdict_str = line.split(':', 1)[1].strip().upper()
-                verdict = Verdict.SCAM if verdict_str == 'SCAM' else Verdict.SAFE
-            elif line.startswith('SUMMARY:'):
-                summary = line.split(':', 1)[1].strip()
-        
-        if not verdict or not summary:
-            # Fallback parsing
-            if 'SCAM' in response_text.upper():
-                verdict = Verdict.SCAM
-            else:
-                verdict = Verdict.SAFE
-            
-            # Extract summary (try to get 5 words)
-            words = response_text.split()
-            summary = ' '.join(words[:5]) if len(words) >= 5 else response_text[:50]
-        
-        # Ensure summary is exactly 5 words
-        summary_words = summary.split()
-        if len(summary_words) > 5:
-            summary = ' '.join(summary_words[:5])
-        elif len(summary_words) < 5:
-            # Pad with generic words if needed
-            while len(summary_words) < 5:
-                summary_words.append("call")
-            summary = ' '.join(summary_words)
-        
-        logger.info(f"Gemini verdict: {verdict}, Summary: {summary}")
-        return verdict, summary
-        
-    except Exception as e:
-        logger.error(f"Error analyzing with Gemini: {e}")
-        # Default to SAFE if analysis fails
-        return Verdict.SAFE, "Unable to analyze call transcript"
-
-
 async def terminate_retell_call(call_id: str, retry_count: int = 3) -> bool:
     """Terminate a call via Retell AI API with retry logic"""
     for attempt in range(retry_count):
@@ -189,7 +105,10 @@ async def terminate_retell_call(call_id: str, retry_count: int = 3) -> bool:
                         "Authorization": f"Bearer {RETELL_API_KEY}",
                         "Content-Type": "application/json"
                     },
-                    json={"end_call": True},
+                    json={
+                        "end_call": True
+                        "end_call_message": "This call has been blocked. Please remove this number from your call list. Goodbye."
+                    },
                     timeout=10.0
                 )
                 response.raise_for_status()
@@ -269,32 +188,6 @@ async def warm_transfer_retell_call(call_id: str, target_number: str, whisper_me
     return False
 
 
-async def send_retell_sms(to_number: str, message: str) -> bool:
-    """Send SMS via Retell AI Chat API"""
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "https://api.retellai.com/create-sms-chat",
-                headers={
-                    "Authorization": f"Bearer {RETELL_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "from_number": WISP_PHONE,
-                    "to_number": to_number,
-                    "message": message,
-                    "agent_id": RETELL_AGENT_ID
-                },
-                timeout=10.0
-            )
-            response.raise_for_status()
-            logger.info(f"Successfully sent Retell SMS to {to_number}")
-            return True
-    except Exception as e:
-        logger.error(f"Error sending Retell SMS: {e}")
-        return False
-
-
 @app.post("/wisp-screen", response_model=ScreeningResponse)
 async def wisp_screen(request: ScreeningRequest):
     """
@@ -320,23 +213,16 @@ async def wisp_screen(request: ScreeningRequest):
     
     # Step 2: Execute based on verdict
     if verdict == Verdict.SCAM:
-        # SCAM flow: Terminate call + Send SMS alert
-        logger.info(f"SCAM detected for call {request.call_id}. Terminating call and sending alert.")
+        # SCAM flow: Terminate call
+        logger.info(f"SCAM detected for call {request.call_id}. Terminating call.")
         
         # Terminate call via Retell (with retry logic)
         termination_success = await terminate_retell_call(request.call_id)
         if not termination_success:
-            logger.error(f"Failed to terminate call {request.call_id}, but continuing with SMS")
-        
-        # Send SMS alert (non-blocking, don't fail if SMS fails)
-        try:
-            sms_message = f"🚨 Wisp Blocked: {summary}."
-            await send_retell_sms(WISP_PHONE, sms_message)
-        except Exception as e:
-            logger.error(f"Failed to send SMS alert: {e}")
+            logger.error(f"Failed to terminate call {request.call_id}")
         
     else:  # SAFE
-        # SAFE flow: Warm transfer + Whisper + SMS alert
+        # SAFE flow: Warm transfer + Whisper
         logger.info(f"SAFE call detected for call {request.call_id}. Initiating warm transfer.")
         
         # Create whisper message
@@ -346,13 +232,6 @@ async def wisp_screen(request: ScreeningRequest):
         transfer_success = await warm_transfer_retell_call(request.call_id, WISP_PHONE, whisper_message)
         if not transfer_success:
             logger.error(f"Failed to initiate warm transfer for call {request.call_id}")
-        
-        # Send SMS alert (non-blocking)
-        try:
-            sms_message = f"✅ Wisp Verified: {summary}. Ringing you now."
-            await send_retell_sms(WISP_PHONE, sms_message)
-        except Exception as e:
-            logger.error(f"Failed to send SMS alert: {e}")
     
     return ScreeningResponse(
         verdict=verdict,
@@ -364,12 +243,12 @@ async def wisp_screen(request: ScreeningRequest):
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    from screening import GEMINI_API_KEY
     return {
         "status": "healthy",
         "service": "Wisp Call Screening API",
         "gemini_configured": GEMINI_API_KEY is not None,
-        "retell_configured": RETELL_API_KEY is not None,
-        "retell_agent_configured": RETELL_AGENT_ID is not None
+        "retell_configured": RETELL_API_KEY is not None
     }
 
 
