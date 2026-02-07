@@ -1,6 +1,6 @@
 """
 Wisp - AI-first call-screening service backend
-Fully Retell-native FastAPI backend for screening calls using Gemini 2.5 Flash-Lite
+Fully Retell-native FastAPI backend for screening calls using Gemma3:1b via Ollama
 Integrates with Retell AI for call orchestration and webhooks
 """
 import os
@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 import httpx
 from datetime import datetime
 from screening import analyze_with_gemini, Verdict
+from database import init_database, create_or_update_call
 
 # Load environment variables
 load_dotenv()
@@ -26,6 +27,13 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(title="Wisp Call Screening API", version="1.0.0")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on application startup"""
+    await init_database()
+    logger.info("Database initialized")
 
 # Call state management (in-memory store for active calls)
 active_calls: Dict[str, Dict[str, Any]] = {}
@@ -106,7 +114,7 @@ async def terminate_retell_call(call_id: str, retry_count: int = 3) -> bool:
                         "Content-Type": "application/json"
                     },
                     json={
-                        "end_call": True
+                        "end_call": True,
                         "end_call_message": "This call has been blocked. Please remove this number from your call list. Goodbye."
                     },
                     timeout=10.0
@@ -114,10 +122,25 @@ async def terminate_retell_call(call_id: str, retry_count: int = 3) -> bool:
                 response.raise_for_status()
                 logger.info(f"Successfully terminated call {call_id}")
                 
-                # Update call state
+                # Update call state (in-memory)
+                terminated_at = datetime.utcnow().isoformat()
                 if call_id in active_calls:
                     active_calls[call_id]["status"] = "terminated"
-                    active_calls[call_id]["terminated_at"] = datetime.utcnow().isoformat()
+                    active_calls[call_id]["terminated_at"] = terminated_at
+                
+                # Persist termination to database
+                try:
+                    call_record = {
+                        "call_id": call_id,
+                        "status": "terminated",
+                        "terminated_at": terminated_at
+                    }
+                    # Merge with existing call data if available
+                    if call_id in active_calls:
+                        call_record.update(active_calls[call_id])
+                    await create_or_update_call(call_record)
+                except Exception as e:
+                    logger.error(f"Failed to persist termination to database: {e}")
                 
                 return True
         except httpx.HTTPStatusError as e:
@@ -161,11 +184,27 @@ async def warm_transfer_retell_call(call_id: str, target_number: str, whisper_me
                 response.raise_for_status()
                 logger.info(f"Successfully initiated warm transfer for call {call_id} to {target_number}")
                 
-                # Update call state
+                # Update call state (in-memory)
+                transfer_initiated_at = datetime.utcnow().isoformat()
                 if call_id in active_calls:
                     active_calls[call_id]["transfer_initiated"] = True
                     active_calls[call_id]["transfer_target"] = target_number
-                    active_calls[call_id]["transfer_initiated_at"] = datetime.utcnow().isoformat()
+                    active_calls[call_id]["transfer_initiated_at"] = transfer_initiated_at
+                
+                # Persist transfer initiation to database
+                try:
+                    call_record = {
+                        "call_id": call_id,
+                        "transfer_initiated": True,
+                        "transfer_target": target_number,
+                        "transfer_initiated_at": transfer_initiated_at
+                    }
+                    # Merge with existing call data if available
+                    if call_id in active_calls:
+                        call_record.update(active_calls[call_id])
+                    await create_or_update_call(call_record)
+                except Exception as e:
+                    logger.error(f"Failed to persist transfer initiation to database: {e}")
                 
                 return True
         except httpx.HTTPStatusError as e:
@@ -193,7 +232,7 @@ async def wisp_screen(request: ScreeningRequest):
     """
     Main screening endpoint for Wisp call screening service.
     
-    Analyzes call transcript with Gemini 2.0 Flash-Lite and executes
+    Analyzes call transcript with Gemma3:1b via Ollama and executes
     appropriate actions based on verdict (SCAM or SAFE).
     Works with both Custom Tool calls and webhook-driven flows.
     """
@@ -202,14 +241,32 @@ async def wisp_screen(request: ScreeningRequest):
     # Check if call is in active calls (from webhook)
     call_state = active_calls.get(request.call_id, {})
     
-    # Step 1: Analyze transcript with Gemini
+    # Step 1: Analyze transcript with Gemma
     verdict, summary = await analyze_with_gemini(request.transcript)
     
-    # Update call state with screening result
+    # Update call state with screening result (in-memory)
+    screened_at = datetime.utcnow().isoformat()
     if request.call_id in active_calls:
         active_calls[request.call_id]["screening_verdict"] = verdict.value
         active_calls[request.call_id]["screening_summary"] = summary
-        active_calls[request.call_id]["screened_at"] = datetime.utcnow().isoformat()
+        active_calls[request.call_id]["screened_at"] = screened_at
+        active_calls[request.call_id]["transcript"] = request.transcript
+    
+    # Persist screening results and transcript to database
+    try:
+        call_record = {
+            "call_id": request.call_id,
+            "screening_verdict": verdict.value,
+            "screening_summary": summary,
+            "screened_at": screened_at,
+            "transcript": request.transcript
+        }
+        # Merge with existing call data if available
+        if request.call_id in active_calls:
+            call_record.update(active_calls[request.call_id])
+        await create_or_update_call(call_record)
+    except Exception as e:
+        logger.error(f"Failed to persist screening results to database: {e}")
     
     # Step 2: Execute based on verdict
     if verdict == Verdict.SCAM:
@@ -243,11 +300,19 @@ async def wisp_screen(request: ScreeningRequest):
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    from screening import GEMINI_API_KEY
+    from screening import OLLAMA_MODEL
+    import ollama
+    ollama_available = False
+    try:
+        ollama.list()
+        ollama_available = True
+    except:
+        pass
     return {
         "status": "healthy",
         "service": "Wisp Call Screening API",
-        "gemini_configured": GEMINI_API_KEY is not None,
+        "ollama_configured": ollama_available,
+        "ollama_model": OLLAMA_MODEL,
         "retell_configured": RETELL_API_KEY is not None
     }
 
@@ -282,6 +347,7 @@ async def retell_webhook(
             raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {str(e)}")
         except UnicodeDecodeError as e:
             raise HTTPException(status_code=400, detail=f"Invalid body encoding: {str(e)}")
+        
         event_type = payload.get("event")
         call_data = payload.get("call", {})
         call_id = call_data.get("call_id")
@@ -290,31 +356,70 @@ async def retell_webhook(
         
         # Handle different event types
         if event_type == "call_started":
-            # Store call state
-            active_calls[call_id] = {
+            # Store call state in memory
+            call_record = {
                 "call_id": call_id,
                 "from_number": call_data.get("from_number"),
                 "to_number": call_data.get("to_number"),
                 "started_at": datetime.utcnow().isoformat(),
                 "status": "active"
             }
-            logger.info(f"Call {call_id} started, stored in active calls")
+            active_calls[call_id] = call_record
+            
+            # Persist to database
+            try:
+                await create_or_update_call(call_record)
+            except Exception as e:
+                logger.error(f"Failed to persist call_started to database: {e}")
+            
+            logger.info(f"Call {call_id} started, stored in active calls and database")
             
         elif event_type == "call_ended":
-            # Remove from active calls
+            # Update call state (in-memory)
+            ended_at = datetime.utcnow().isoformat()
             if call_id in active_calls:
                 active_calls[call_id]["status"] = "ended"
-                active_calls[call_id]["ended_at"] = datetime.utcnow().isoformat()
-                # Keep for a short time for analytics, then remove
-                # In production, you might want to persist this to a database
+                active_calls[call_id]["ended_at"] = ended_at
+            
+            # Persist call end to database
+            try:
+                call_record = {
+                    "call_id": call_id,
+                    "status": "ended",
+                    "ended_at": ended_at
+                }
+                # Merge with existing call data if available
+                if call_id in active_calls:
+                    call_record.update(active_calls[call_id])
+                await create_or_update_call(call_record)
+            except Exception as e:
+                logger.error(f"Failed to persist call_ended to database: {e}")
+            
             logger.info(f"Call {call_id} ended")
             
         elif event_type == "call_transferred":
-            # Update call state with transfer information
+            # Update call state with transfer information (in-memory)
+            transferred_at = datetime.utcnow().isoformat()
+            transferred_to = call_data.get("transfer_phone_number")
             if call_id in active_calls:
-                active_calls[call_id]["transferred_to"] = call_data.get("transfer_phone_number")
-                active_calls[call_id]["transferred_at"] = datetime.utcnow().isoformat()
-            logger.info(f"Call {call_id} transferred to {call_data.get('transfer_phone_number')}")
+                active_calls[call_id]["transferred_to"] = transferred_to
+                active_calls[call_id]["transferred_at"] = transferred_at
+            
+            # Persist transfer to database
+            try:
+                call_record = {
+                    "call_id": call_id,
+                    "transferred_to": transferred_to,
+                    "transferred_at": transferred_at
+                }
+                # Merge with existing call data if available
+                if call_id in active_calls:
+                    call_record.update(active_calls[call_id])
+                await create_or_update_call(call_record)
+            except Exception as e:
+                logger.error(f"Failed to persist call_transferred to database: {e}")
+            
+            logger.info(f"Call {call_id} transferred to {transferred_to}")
         
         return {"status": "ok", "event": event_type, "call_id": call_id}
         
