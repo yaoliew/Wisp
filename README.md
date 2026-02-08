@@ -1,16 +1,102 @@
 # Wisp
 intent-based AI call filter
 
-## Overview
+## Purpose
 
-Wisp is an AI-first call-screening service that uses Gemini 2.5 Flash-Lite to analyze incoming calls and automatically filter out scams while safely routing legitimate calls. The service is fully Retell-native, using Retell AI for call orchestration and telephony infrastructure.
+Wisp is an AI-first call-screening service designed to automatically filter out scam calls while safely routing legitimate calls to you. The system analyzes incoming call transcripts in real-time using local AI, determines whether a call is a scam or safe, and automatically terminates scam calls or transfers legitimate ones to your phone with a brief verification message. This eliminates the need to manually screen every call and protects you from phone scams and fraud.
+
+## Tools Utilized
+
+### Backend
+- **FastAPI** - Modern Python web framework for building REST APIs
+- **Uvicorn** - ASGI server for running FastAPI applications
+- **Python 3.10+** - Programming language
+- **SQLite** (via aiosqlite) - Lightweight database for storing call records
+- **Ollama** - Local LLM runtime for running AI models
+- **Gemma3:1b** - Google's lightweight language model for transcript analysis
+- **httpx** - Async HTTP client for API calls
+- **Pydantic** - Data validation using Python type annotations
+- **python-dotenv** - Environment variable management
+
+### Frontend
+- **React 18** - UI library
+- **TypeScript** - Type-safe JavaScript
+- **Vite** - Build tool and dev server
+- **Tailwind CSS** - Utility-first CSS framework
+- **Radix UI** - Unstyled, accessible component primitives
+  - @radix-ui/react-dialog
+  - @radix-ui/react-label
+  - @radix-ui/react-select
+  - @radix-ui/react-switch
+  - @radix-ui/react-slot
+- **React Router** - Client-side routing
+- **Recharts** - Charting library for analytics
+- **Lucide React** - Icon library
+- **date-fns** - Date utility library
+- **class-variance-authority** - Component variant management
+- **clsx** & **tailwind-merge** - Conditional class utilities
+
+### External Services
+- **Retell AI** - Telephony infrastructure and call orchestration
+- **ngrok** - Local development tunneling (for exposing backend to Retell)
+
+## Problems Encountered & Solutions
+
+### Problem 1: Retell Custom Tool Not Triggering on Subsequent Calls
+**Issue:** After the first successful call screening, subsequent calls were bypassing the screening endpoint and going straight to the phone without analysis.
+
+**Solution:** The issue was in the Retell AI configuration. We discovered that the Custom Tool URL needed to be verified and the Retell agent needed to be explicitly configured to call the tool on every call, not just conditionally. We also added comprehensive logging to track when the `/wisp-screen` endpoint was called vs. when it wasn't, which helped diagnose the configuration issue.
+
+### Problem 2: Webhook Signature Verification
+**Issue:** During development, webhook signature verification was failing, causing legitimate webhooks to be rejected.
+
+**Solution:** We implemented a development mode that logs signature verification failures but allows requests through. In production, strict verification can be enabled. We also improved the signature parsing logic to handle Retell's specific signature format (`v=<timestamp>,d=<signature>`).
+
+### Problem 3: Call Transfer Timing Issues
+**Issue:** Sometimes calls would be transferred before the screening verdict was determined, or transfers would fail because the call had already ended.
+
+**Solution:** We added call status checks before attempting transfers, verifying that calls are still active both in-memory state and the database. We also implemented retry logic with exponential backoff for all Retell API calls to handle transient failures.
+
+### Problem 4: React Router and GitHub Pages Deployment
+**Issue:** When deploying to GitHub Pages, React Router's `BrowserRouter` caused 404 errors on page refresh due to GitHub Pages serving from a subpath.
+
+**Solution:** We configured Vite with a base path and switched to `HashRouter` for GitHub Pages deployment, which uses URL hashes instead of paths, avoiding the 404 issue entirely.
+
+### Problem 5: CORS Configuration
+**Issue:** Frontend running on localhost couldn't access the backend API due to CORS restrictions.
+
+**Solution:** We configured FastAPI's CORS middleware to allow requests from common frontend development ports (localhost:3000, localhost:5173, localhost:5174) and added support for GitHub Pages domains in production.
+
+## Credits & Acknowledgments
+
+### APIs & Services
+- **[Retell AI](https://retellai.com/)** - Telephony infrastructure, call orchestration, and phone number management
+- **[Ollama](https://ollama.ai/)** - Local LLM runtime for running AI models
+- **[Google Gemma](https://ai.google.dev/gemma)** - Open-source language model (Gemma3:1b) used for call transcript analysis
+
+### Frameworks & Libraries
+- **[FastAPI](https://fastapi.tiangolo.com/)** - Modern Python web framework
+- **[React](https://react.dev/)** - UI library
+- **[Vite](https://vitejs.dev/)** - Build tool
+- **[Tailwind CSS](https://tailwindcss.com/)** - CSS framework
+- **[Radix UI](https://www.radix-ui.com/)** - Accessible component primitives
+- **[Recharts](https://recharts.org/)** - Charting library
+- **[React Router](https://reactrouter.com/)** - Routing library
+- **[Lucide](https://lucide.dev/)** - Icon library
+- **[date-fns](https://date-fns.org/)** - Date utilities
+
+### Development Tools
+- **[ngrok](https://ngrok.com/)** - Local development tunneling
+- **[TypeScript](https://www.typescriptlang.org/)** - Type-safe JavaScript
+- **[ESLint](https://eslint.org/)** - Code linting
 
 ## Architecture
 
-- **Orchestration:** Retell AI (using ElevenLabs Voice)
-- **AI Brain:** Gemini 2.5 Flash-Lite (Google SDK via Retell Custom Tool)
-- **Telephony:** Retell AI (phone numbers, call routing)
-- **Webhooks:** Retell call event webhooks for real-time monitoring
+- **Orchestration:** Retell AI (call handling and telephony infrastructure)
+- **AI Brain:** Ollama with Gemma3:1b (local LLM for transcript analysis)
+- **Backend:** FastAPI (Python) with SQLite database
+- **Frontend:** React + TypeScript with Vite
+- **Telephony:** Retell AI (phone numbers, call routing, webhooks)
 
 ## Setup Instructions
 
@@ -30,9 +116,10 @@ cp .env.example .env
 ```
 
 Edit `.env` with your credentials:
-- `GEMINI_API_KEY`: Your Google Gemini API key
 - `RETELL_API_KEY`: Your Retell AI API key
 - `RETELL_WEBHOOK_SECRET`: Your Retell webhook secret (for webhook verification, optional but recommended)
+- `OLLAMA_MODEL`: Ollama model to use (default: "gemma3:1b")
+- `OLLAMA_HOST`: Ollama server URL (default: "http://localhost:11434")
 
 ### 3. Start the FastAPI Server
 
@@ -165,27 +252,32 @@ Root endpoint with API information.
 
 1. Incoming call arrives at Retell phone number
 2. Retell webhook sends `call_started` event to `/retell-webhook`
-3. Retell agent engages caller and collects transcript
-4. Retell Custom Tool calls `/wisp-screen` with transcript
-5. Gemini 2.5 Flash-Lite analyzes transcript and returns verdict + 5-word summary
-6. System executes routing based on verdict
+3. Backend stores call metadata in SQLite database
+4. Retell agent engages caller and collects transcript
+5. Retell Custom Tool calls `/wisp-screen` endpoint with transcript
+6. Backend sends transcript to Ollama (Gemma3:1b) for analysis
+7. Ollama returns verdict (SCAM/SAFE) + 5-word summary
+8. Backend stores screening results in database
+9. System executes routing based on verdict
 
 ### SCAM Detection Flow
 
-1. Call transcript is sent to Gemini 2.5 Flash-Lite via Custom Tool
-2. Gemini analyzes and returns verdict + 5-word summary
-3. If **SCAM:**
-   - Retell terminates the call (with retry logic)
-   - Webhook receives `call_ended` event
+1. Call transcript is sent to Ollama via `/wisp-screen` endpoint
+2. Gemma3:1b model analyzes transcript and returns SCAM verdict + summary
+3. Backend stores verdict in database
+4. Backend calls Retell API to terminate the call (with retry logic)
+5. Retell webhook sends `call_ended` event
+6. Backend updates database with final call state
 
 ### SAFE Call Flow
 
-1. Call transcript is sent to Gemini 2.5 Flash-Lite via Custom Tool
-2. Gemini analyzes and returns verdict + 5-word summary
-3. If **SAFE:**
-   - Retell initiates warm transfer to your phone number
-   - Whisper message plays: `"Wisp here. Verified: [Summary]. Press any key to bridge."`
-   - Webhook receives `call_transferred` event
+1. Call transcript is sent to Ollama via `/wisp-screen` endpoint
+2. Gemma3:1b model analyzes transcript and returns SAFE verdict + summary
+3. Backend stores verdict in database
+4. Backend calls Retell API to initiate warm transfer to your phone number
+5. Whisper message plays: `"Wisp here. Verified: [Summary]. Press any key to bridge."`
+6. Retell webhook sends `call_transferred` event
+7. Backend updates database with transfer information
 
 ## Development
 
@@ -204,22 +296,25 @@ uvicorn backend.main:app --reload
 
 ### Testing the API
 
-#### Test Gemini Integration
+#### Test Ollama Integration
 
-Test the Gemini API integration independently:
+Test the Ollama/Gemma integration independently:
 
 ```bash
 cd backend
-python test_gemini.py
+python screening.py
 ```
 
-This will run two standard tests (scam and safe call scenarios) and optionally allow you to test with a custom transcript.
-
-You can also pass a custom transcript as a command-line argument:
+This will run a test with a sample transcript and show the verdict and summary. You can also pass a custom transcript as a command-line argument:
 
 ```bash
 cd backend
-python test_gemini.py "Hello, this is a test call from a potential scammer asking for your credit card"
+python screening.py "Hello, this is a test call from a potential scammer asking for your credit card"
+```
+
+**Note:** Make sure Ollama is running locally with the Gemma3:1b model installed:
+```bash
+ollama pull gemma3:1b
 ```
 
 #### Test the Full API Endpoint
