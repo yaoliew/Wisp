@@ -17,6 +17,7 @@ Wisp is an AI-first call-screening service that uses Gemini 2.5 Flash-Lite to an
 ### 1. Install Dependencies
 
 ```bash
+cd backend
 pip install -r requirements.txt
 ```
 
@@ -35,9 +36,30 @@ Edit `.env` with your credentials:
 
 ### 3. Start the FastAPI Server
 
+**Option 1: Run from backend directory (Recommended)**
 ```bash
+cd backend
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+Or use the convenience script:
+```bash
+./backend/run.sh
+```
+
+**Option 2: Run from project root**
+```bash
+# Set PYTHONPATH to include project root
+export PYTHONPATH="${PYTHONPATH}:$(pwd)"
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Or use the convenience script:
+```bash
+./run_backend.sh
+```
+
+**Important:** When running from the `backend/` directory, use `main:app`. When running from the project root, use `backend.main:app` and ensure PYTHONPATH includes the project root.
 
 The API will be available at `http://localhost:8000`
 
@@ -82,7 +104,7 @@ Copy the HTTPS URL (e.g., `https://abc123.ngrok.io`)
 1. In Retell AI dashboard, navigate to Phone Numbers
 2. Purchase or configure a phone number for your Wisp service
 3. Assign the number to your Retell agent
-4. Update `WISP_PHONE` in `main.py` with your Retell phone number (or set via environment variable)
+4. Update `WISP_PHONE` in `backend/main.py` with your Retell phone number (or set via environment variable)
 
 ## API Endpoints
 
@@ -170,7 +192,14 @@ Root endpoint with API information.
 ### Running in Development Mode
 
 ```bash
+cd backend
 uvicorn main:app --reload
+```
+
+Or from the project root:
+
+```bash
+uvicorn backend.main:app --reload
 ```
 
 ### Testing the API
@@ -180,6 +209,7 @@ uvicorn main:app --reload
 Test the Gemini API integration independently:
 
 ```bash
+cd backend
 python test_gemini.py
 ```
 
@@ -188,6 +218,7 @@ This will run two standard tests (scam and safe call scenarios) and optionally a
 You can also pass a custom transcript as a command-line argument:
 
 ```bash
+cd backend
 python test_gemini.py "Hello, this is a test call from a potential scammer asking for your credit card"
 ```
 
