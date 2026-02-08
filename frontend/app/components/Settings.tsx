@@ -14,7 +14,7 @@ export function Settings() {
   // State for all settings (non-functional, just for visuals)
   const [sessionManagement, setSessionManagement] = useState(true);
   const [digestMode, setDigestMode] = useState('weekly');
-  const [creditCardBalance, setCreditCardBalance] = useState(1250.00);
+  const [creditCardBalance, setCreditCardBalance] = useState(32.67);
   const [autoTopoff, setAutoTopoff] = useState(false);
   const [dataRetention, setDataRetention] = useState('7 days');
   const [autoMasking, setAutoMasking] = useState(true);
@@ -111,7 +111,7 @@ export function Settings() {
                       Auto-Topoff
                     </Label>
                     <p className="text-[12px] text-zinc-500 mt-0.5">
-                      Automatically add funds when balance falls below $100
+                      Automatically add funds when balance falls below $3
                     </p>
                   </div>
                   <Switch

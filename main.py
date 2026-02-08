@@ -18,7 +18,7 @@ import httpx
 from datetime import datetime
 from typing import Optional
 from screening import analyze_with_gemini, Verdict
-from database import init_database, create_or_update_call, get_all_calls, get_call, get_active_calls, get_stats, get_analytics_data, get_transcript_metrics
+from database import init_database, create_or_update_call, get_all_calls, get_call, get_active_calls, get_stats, get_analytics_data
 
 # Load environment variables
 load_dotenv()
@@ -134,7 +134,7 @@ async def terminate_retell_call(call_id: str, retry_count: int = 3) -> bool:
                 logger.info(f"Successfully terminated call {call_id}")
                 
                 # Update call state (in-memory)
-                terminated_at = datetime.utcnow().isoformat() + "Z"
+                terminated_at = datetime.utcnow().isoformat()
                 if call_id in active_calls:
                     active_calls[call_id]["status"] = "terminated"
                     active_calls[call_id]["terminated_at"] = terminated_at
@@ -174,199 +174,29 @@ async def terminate_retell_call(call_id: str, retry_count: int = 3) -> bool:
     return False
 
 
-async def invoke_custom_transfer_call(call_id: str, target_number: str, whisper_message: str, retry_count: int = 3) -> bool:
-    """
-    Invoke custom transfer_call method via Retell API.
-    
-    This function attempts to trigger your custom transfer_call method in Retell.
-    The exact API endpoint and payload format may vary depending on how your
-    custom method is configured in Retell. You may need to adjust the payload
-    structure based on your Retell configuration.
-    """
-    if not RETELL_API_KEY:
-        logger.error("RETELL_API_KEY not configured, cannot invoke custom transfer")
-        return False
-    
+async def warm_transfer_retell_call(call_id: str, target_number: str, whisper_message: str, retry_count: int = 3) -> bool:
+    """Initiate warm transfer via Retell AI API with retry logic"""
     for attempt in range(retry_count):
         try:
-            # Try different payload formats that might work with custom transfer methods
-            # Adjust these based on your Retell custom tool configuration
-            payload = {
-                "transfer_phone_number": target_number,
-                "whisper_message": whisper_message,
-                "enable_voicemail_detection": False
-            }
-            
-            # Alternative: If your custom method expects different parameters, uncomment and modify:
-            # payload = {
-            #     "action": "transfer",
-            #     "phone_number": target_number,
-            #     "message": whisper_message
-            # }
-            
-            url = f"https://api.retellai.com/update-call/{call_id}"
-            logger.info(f"Invoking custom transfer_call for call {call_id} to {target_number} (attempt {attempt + 1}/{retry_count})")
-            logger.debug(f"Custom transfer payload: {payload}")
-            
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    url,
+                    f"https://api.retellai.com/update-call/{call_id}",
                     headers={
                         "Authorization": f"Bearer {RETELL_API_KEY}",
                         "Content-Type": "application/json"
                     },
-                    json=payload,
-                    timeout=10.0
-                )
-                
-                logger.debug(f"Response status: {response.status_code}")
-                try:
-                    response_body = response.json()
-                    logger.debug(f"Response body: {response_body}")
-                except:
-                    response_text = response.text
-                    logger.debug(f"Response text: {response_text}")
-                
-                response.raise_for_status()
-                logger.info(f"Successfully invoked custom transfer_call for call {call_id} to {target_number}")
-                
-                # Update call state
-                transfer_initiated_at = datetime.utcnow().isoformat() + "Z"
-                if call_id in active_calls:
-                    active_calls[call_id]["transfer_initiated"] = True
-                    active_calls[call_id]["transfer_target"] = target_number
-                    active_calls[call_id]["transfer_initiated_at"] = transfer_initiated_at
-                    active_calls[call_id]["transfer_method"] = "custom"
-                
-                # Persist to database
-                try:
-                    call_record = {
-                        "call_id": call_id,
-                        "transfer_initiated": True,
-                        "transfer_target": target_number,
-                        "transfer_initiated_at": transfer_initiated_at,
-                        "transfer_method": "custom"
-                    }
-                    if call_id in active_calls:
-                        call_record.update(active_calls[call_id])
-                    await create_or_update_call(call_record)
-                except Exception as e:
-                    logger.error(f"Failed to persist custom transfer to database: {e}")
-                
-                return True
-        except httpx.HTTPStatusError as e:
-            error_details = {
-                "status_code": e.response.status_code,
-                "url": url,
-                "call_id": call_id
-            }
-            try:
-                error_body = e.response.json()
-                error_details["error_body"] = error_body
-                logger.error(f"HTTP error invoking custom transfer: {error_details}")
-            except:
-                error_text = e.response.text
-                error_details["error_text"] = error_text
-                logger.error(f"HTTP error invoking custom transfer: {error_details}")
-            
-            if e.response.status_code == 404:
-                logger.warning(f"Call {call_id} not found (404) for custom transfer. Call may have ended or endpoint is incorrect.")
-                return False
-            elif attempt < retry_count - 1:
-                logger.warning(f"Error invoking custom transfer (attempt {attempt + 1}/{retry_count}): {e.response.status_code}")
-                await asyncio.sleep(1 * (attempt + 1))
-            else:
-                logger.error(f"Failed to invoke custom transfer after {retry_count} attempts")
-                return False
-        except Exception as e:
-            logger.error(f"Unexpected error invoking custom transfer: {e}", exc_info=True)
-            if attempt < retry_count - 1:
-                await asyncio.sleep(1 * (attempt + 1))
-            else:
-                return False
-    return False
-
-
-async def warm_transfer_retell_call(call_id: str, target_number: str, whisper_message: str, retry_count: int = 3, use_custom: bool = False) -> bool:
-    """Initiate warm transfer via Retell AI API with retry logic
-    
-    Args:
-        call_id: The call ID to transfer
-        target_number: Phone number to transfer to
-        whisper_message: Message to whisper during transfer
-        retry_count: Number of retry attempts
-        use_custom: If True, use custom transfer_call method instead of standard API
-    """
-    # Use custom transfer method if requested
-    if use_custom:
-        return await invoke_custom_transfer_call(call_id, target_number, whisper_message, retry_count)
-    
-    if not RETELL_API_KEY:
-        logger.error("RETELL_API_KEY not configured, cannot initiate warm transfer")
-        return False
-    
-    # Verify call is still active before attempting transfer
-    call_status = None
-    if call_id in active_calls:
-        call_status = active_calls[call_id].get("status")
-        if call_status == "ended" or call_status == "terminated":
-            logger.warning(f"Call {call_id} has status '{call_status}', cannot transfer")
-            return False
-    else:
-        logger.warning(f"Call {call_id} not in active_calls, checking database...")
-        # Check database to see if call exists and is active
-        try:
-            db_call = await get_call(call_id)
-            if db_call:
-                call_status = db_call.get("status")
-                if call_status in ["ended", "terminated"]:
-                    logger.warning(f"Call {call_id} has status '{call_status}' in database, cannot transfer")
-                    return False
-                logger.info(f"Call {call_id} found in database with status '{call_status}', proceeding with transfer")
-            else:
-                logger.warning(f"Call {call_id} not found in database or active_calls, but attempting transfer anyway (may be timing issue)")
-        except Exception as e:
-            logger.warning(f"Error checking database for call {call_id}: {e}, proceeding with transfer attempt")
-    
-    for attempt in range(retry_count):
-        try:
-            payload = {
-                "transfer_phone_number": target_number,
-                "enable_voicemail_detection": False,
-                "whisper_message": whisper_message
-            }
-            
-            url = f"https://api.retellai.com/update-call/{call_id}"
-            logger.info(f"Attempting warm transfer for call {call_id} to {target_number} (attempt {attempt + 1}/{retry_count})")
-            logger.debug(f"Transfer payload: {payload}")
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {RETELL_API_KEY}",
-                        "Content-Type": "application/json"
+                    json={
+                        "transfer_phone_number": target_number,
+                        "enable_voicemail_detection": False,
+                        "whisper_message": whisper_message
                     },
-                    json=payload,
                     timeout=10.0
                 )
-                
-                # Log response details for debugging
-                logger.debug(f"Response status: {response.status_code}")
-                logger.debug(f"Response headers: {dict(response.headers)}")
-                
-                try:
-                    response_body = response.json()
-                    logger.debug(f"Response body: {response_body}")
-                except:
-                    response_text = response.text
-                    logger.debug(f"Response text: {response_text}")
-                
                 response.raise_for_status()
                 logger.info(f"Successfully initiated warm transfer for call {call_id} to {target_number}")
                 
                 # Update call state (in-memory)
-                transfer_initiated_at = datetime.utcnow().isoformat() + "Z"
+                transfer_initiated_at = datetime.utcnow().isoformat()
                 if call_id in active_calls:
                     active_calls[call_id]["transfer_initiated"] = True
                     active_calls[call_id]["transfer_target"] = target_number
@@ -389,57 +219,21 @@ async def warm_transfer_retell_call(call_id: str, target_number: str, whisper_me
                 
                 return True
         except httpx.HTTPStatusError as e:
-            # Log detailed error information
-            error_details = {
-                "status_code": e.response.status_code,
-                "url": url,
-                "call_id": call_id
-            }
-            try:
-                error_body = e.response.json()
-                error_details["error_body"] = error_body
-                logger.error(f"HTTP error details: {error_details}")
-            except:
-                error_text = e.response.text
-                error_details["error_text"] = error_text
-                logger.error(f"HTTP error details: {error_details}")
-            
             if e.response.status_code == 404:
-                logger.warning(f"Call {call_id} not found (404), cannot transfer. Call may have already ended or call_id is invalid.")
-                # Check if call exists in database
-                try:
-                    db_call = await get_call(call_id)
-                    if db_call:
-                        logger.info(f"Call {call_id} exists in database with status: {db_call.get('status')}")
-                    else:
-                        logger.warning(f"Call {call_id} not found in database either")
-                except Exception as db_error:
-                    logger.error(f"Error checking database for call {call_id}: {db_error}")
+                logger.warning(f"Call {call_id} not found, cannot transfer")
                 return False
-            elif e.response.status_code == 401:
-                logger.error(f"Authentication failed (401). Check RETELL_API_KEY configuration.")
-                return False
-            elif e.response.status_code == 400:
-                logger.error(f"Bad request (400). Check payload format and call_id format.")
-                return False
-            else:
-                if attempt < retry_count - 1:
-                    logger.warning(f"Error initiating transfer for call {call_id} (attempt {attempt + 1}/{retry_count}): {e.response.status_code}")
-                    await asyncio.sleep(1 * (attempt + 1))  # Exponential backoff
-                else:
-                    logger.error(f"Error initiating warm transfer after {retry_count} attempts: {e.response.status_code}")
-                    return False
-        except httpx.RequestError as e:
-            logger.error(f"Request error (network/timeout) for call {call_id}: {e}")
             if attempt < retry_count - 1:
-                await asyncio.sleep(1 * (attempt + 1))
+                logger.warning(f"Error initiating transfer for call {call_id} (attempt {attempt + 1}/{retry_count}): {e}")
+                await asyncio.sleep(1 * (attempt + 1))  # Exponential backoff
             else:
+                logger.error(f"Error initiating warm transfer after {retry_count} attempts: {e}")
                 return False
         except Exception as e:
-            logger.error(f"Unexpected error initiating transfer for call {call_id}: {e}", exc_info=True)
             if attempt < retry_count - 1:
+                logger.warning(f"Error initiating transfer for call {call_id} (attempt {attempt + 1}/{retry_count}): {e}")
                 await asyncio.sleep(1 * (attempt + 1))
             else:
+                logger.error(f"Error initiating warm transfer after {retry_count} attempts: {e}")
                 return False
     return False
 
@@ -494,7 +288,7 @@ async def wisp_screen(request: Request):
     verdict, summary = await analyze_with_gemini(transcript)
     
     # Update call state with screening result (in-memory)
-    screened_at = datetime.utcnow().isoformat() + "Z"
+    screened_at = datetime.utcnow().isoformat()
     if call_id in active_calls:
         active_calls[call_id]["screening_verdict"] = verdict.value
         active_calls[call_id]["screening_summary"] = summary
@@ -535,9 +329,7 @@ async def wisp_screen(request: Request):
         whisper_message = f"Wisp here. Verified: {summary}. Press any key to bridge."
         
         # Initiate warm transfer via Retell (with retry logic)
-        # Set use_custom=True to use custom transfer_call method
-        use_custom_transfer = os.getenv("USE_CUSTOM_TRANSFER", "false").lower() == "true"
-        transfer_success = await warm_transfer_retell_call(call_id, WISP_PHONE, whisper_message, use_custom=use_custom_transfer)
+        transfer_success = await warm_transfer_retell_call(call_id, WISP_PHONE, whisper_message)
         if not transfer_success:
             logger.error(f"Failed to initiate warm transfer for call {call_id}")
     
@@ -649,23 +441,6 @@ async def get_analytics_endpoint(
         raise HTTPException(status_code=500, detail=f"Error fetching analytics: {str(e)}")
 
 
-@app.get("/api/transcripts/metrics")
-async def get_transcript_metrics_endpoint():
-    """
-    Fetch transcript metrics for the transcripts page.
-    
-    Returns:
-    - average_word_count: Average number of words per transcript
-    - total_transcripts: Total number of calls with transcripts
-    """
-    try:
-        metrics = await get_transcript_metrics()
-        return metrics
-    except Exception as e:
-        logger.error(f"Error fetching transcript metrics: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error fetching transcript metrics: {str(e)}")
-
-
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
@@ -730,7 +505,7 @@ async def retell_webhook(
                 "call_id": call_id,
                 "from_number": call_data.get("from_number"),
                 "to_number": call_data.get("to_number"),
-                "started_at": datetime.utcnow().isoformat() + "Z",
+                "started_at": datetime.utcnow().isoformat(),
                 "status": "active"
             }
             active_calls[call_id] = call_record
@@ -745,7 +520,7 @@ async def retell_webhook(
             
         elif event_type == "call_ended":
             # Update call state (in-memory)
-            ended_at = datetime.utcnow().isoformat() + "Z"
+            ended_at = datetime.utcnow().isoformat()
             if call_id in active_calls:
                 active_calls[call_id]["status"] = "ended"
                 active_calls[call_id]["ended_at"] = ended_at
@@ -768,7 +543,7 @@ async def retell_webhook(
             
         elif event_type == "call_transferred":
             # Update call state with transfer information (in-memory)
-            transferred_at = datetime.utcnow().isoformat() + "Z"
+            transferred_at = datetime.utcnow().isoformat()
             transferred_to = call_data.get("transfer_phone_number")
             if call_id in active_calls:
                 active_calls[call_id]["transferred_to"] = transferred_to
@@ -800,118 +575,6 @@ async def retell_webhook(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/transfer-call")
-async def transfer_call_endpoint(request: Request):
-    """
-    Transfer a call using either standard Retell API or custom transfer_call method.
-    This endpoint can be called directly or by Retell's custom tool.
-    
-    Accepts both query parameters and JSON body (for Retell custom tool calls).
-    """
-    if not RETELL_API_KEY:
-        raise HTTPException(status_code=500, detail="RETELL_API_KEY not configured")
-    
-    # Parse request - support both query params and JSON body (for Retell custom tools)
-    try:
-        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-    except:
-        body = {}
-    
-    # Extract parameters from query string or body
-    call_id = body.get("call_id") or body.get("args", {}).get("call_id") or request.query_params.get("call_id")
-    target_number = body.get("target_number") or body.get("args", {}).get("target_number") or request.query_params.get("target_number")
-    whisper_message = body.get("whisper_message") or body.get("args", {}).get("whisper_message") or request.query_params.get("whisper_message")
-    use_custom = body.get("use_custom", False) if isinstance(body.get("use_custom"), bool) else request.query_params.get("use_custom", "false").lower() == "true"
-    
-    if not call_id:
-        raise HTTPException(status_code=422, detail="call_id is required")
-    
-    target = target_number or WISP_PHONE
-    whisper = whisper_message or f"Wisp here. Press any key to bridge."
-    
-    logger.info(f"Transfer call requested for call {call_id} to {target} (custom={use_custom})")
-    
-    # Check if call exists in active calls or database
-    call_info = {
-        "in_active_calls": call_id in active_calls,
-        "active_call_status": active_calls.get(call_id, {}).get("status") if call_id in active_calls else None
-    }
-    
-    try:
-        db_call = await get_call(call_id)
-        call_info["in_database"] = db_call is not None
-        if db_call:
-            call_info["db_status"] = db_call.get("status")
-    except Exception as e:
-        logger.warning(f"Error checking database for call {call_id}: {e}")
-        call_info["db_check_error"] = str(e)
-    
-    # Attempt the transfer
-    if use_custom:
-        success = await invoke_custom_transfer_call(call_id, target, whisper)
-    else:
-        success = await warm_transfer_retell_call(call_id, target, whisper, use_custom=False)
-    
-    return {
-        "success": success,
-        "call_id": call_id,
-        "target_number": target,
-        "whisper_message": whisper,
-        "method": "custom" if use_custom else "standard",
-        "call_info": call_info,
-        "message": "Transfer initiated successfully" if success else "Transfer failed - check logs for details"
-    }
-
-
-@app.post("/api/test-transfer")
-async def test_transfer_endpoint(
-    call_id: str = Query(..., description="Call ID to test transfer with"),
-    target_number: Optional[str] = Query(None, description="Target phone number (defaults to WISP_PHONE)"),
-    use_custom: bool = Query(False, description="Use custom transfer_call method")
-):
-    """
-    Test endpoint to verify warm transfer functionality.
-    This endpoint allows manual testing of the warm transfer API call.
-    """
-    if not RETELL_API_KEY:
-        raise HTTPException(status_code=500, detail="RETELL_API_KEY not configured")
-    
-    target = target_number or WISP_PHONE
-    whisper_message = "Test transfer from Wisp. Press any key to bridge."
-    
-    logger.info(f"Test transfer requested for call {call_id} to {target} (custom={use_custom})")
-    
-    # Check if call exists in active calls or database
-    call_info = {
-        "in_active_calls": call_id in active_calls,
-        "active_call_status": active_calls.get(call_id, {}).get("status") if call_id in active_calls else None
-    }
-    
-    try:
-        db_call = await get_call(call_id)
-        call_info["in_database"] = db_call is not None
-        if db_call:
-            call_info["db_status"] = db_call.get("status")
-    except Exception as e:
-        logger.warning(f"Error checking database for call {call_id}: {e}")
-        call_info["db_check_error"] = str(e)
-    
-    # Attempt the transfer
-    if use_custom:
-        success = await invoke_custom_transfer_call(call_id, target, whisper_message)
-    else:
-        success = await warm_transfer_retell_call(call_id, target, whisper_message, use_custom=False)
-    
-    return {
-        "success": success,
-        "call_id": call_id,
-        "target_number": target,
-        "method": "custom" if use_custom else "standard",
-        "call_info": call_info,
-        "message": "Transfer initiated successfully" if success else "Transfer failed - check logs for details"
-    }
-
-
 @app.get("/")
 async def root():
     """Root endpoint"""
@@ -921,9 +584,7 @@ async def root():
         "endpoints": {
             "screening": "/wisp-screen",
             "webhook": "/retell-webhook",
-            "health": "/health",
-            "transfer_call": "/api/transfer-call",
-            "test_transfer": "/api/test-transfer"
+            "health": "/health"
         }
     }
 

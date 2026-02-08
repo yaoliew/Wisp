@@ -2,7 +2,6 @@
 Database module for Wisp call persistence
 Handles SQLite database operations for storing call data
 """
-import os
 import aiosqlite
 import logging
 from typing import Dict, Any, Optional
@@ -11,8 +10,8 @@ from contextlib import asynccontextmanager
 
 logger = logging.getLogger(__name__)
 
-# Database file path - stored in parent directory
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "wisp_calls.db")
+# Database file path
+DB_PATH = "wisp_calls.db"
 
 
 async def init_database():
@@ -67,7 +66,7 @@ async def create_or_update_call(call_data: Dict[str, Any]) -> bool:
         True if successful, False otherwise
     """
     try:
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.utcnow().isoformat()
         
         # Ensure created_at and updated_at are set
         if "created_at" not in call_data:
@@ -440,64 +439,4 @@ async def get_analytics_data(period: str = "daily") -> Dict[str, Any]:
             "scam_safe_ratio": {"scam": 0, "safe": 0},
             "avg_call_duration": 0.0,
             "top_scam_categories": []
-        }
-
-
-async def get_transcript_metrics() -> Dict[str, Any]:
-    """
-    Calculate transcript metrics from the database.
-    
-    Returns:
-        Dictionary containing:
-        - average_word_count: Average number of words per transcript
-        - total_transcripts: Total number of calls with transcripts
-    """
-    try:
-        async with get_db_connection() as db:
-            # Get total number of transcripts (calls with non-null, non-empty transcript)
-            async with db.execute(
-                """
-                SELECT COUNT(*) as count 
-                FROM calls 
-                WHERE transcript IS NOT NULL 
-                AND transcript != ''
-                """
-            ) as cursor:
-                row = await cursor.fetchone()
-                total_transcripts = row[0] if row else 0
-            
-            # Calculate average word count
-            # We need to count words in each transcript
-            # SQLite doesn't have a built-in word count, so we'll approximate
-            # by counting spaces + 1, or use a more sophisticated approach
-            async with db.execute(
-                """
-                SELECT transcript 
-                FROM calls 
-                WHERE transcript IS NOT NULL 
-                AND transcript != ''
-                """
-            ) as cursor:
-                rows = await cursor.fetchall()
-                if rows and len(rows) > 0:
-                    total_words = 0
-                    for row in rows:
-                        transcript = row[0]
-                        if transcript:
-                            # Count words by splitting on whitespace
-                            words = transcript.split()
-                            total_words += len(words)
-                    average_word_count = round(total_words / len(rows), 1) if len(rows) > 0 else 0
-                else:
-                    average_word_count = 0
-            
-            return {
-                "average_word_count": average_word_count,
-                "total_transcripts": total_transcripts
-            }
-    except Exception as e:
-        logger.error(f"Error retrieving transcript metrics from database: {e}", exc_info=True)
-        return {
-            "average_word_count": 0,
-            "total_transcripts": 0
         }

@@ -51,17 +51,10 @@ export function Transcripts() {
       );
     }
     
-    if (verdict === 'SAFE') {
-      return (
-        <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-emerald-800/50">
-          <span className="text-[12px] font-semibold text-emerald-500">SAFE</span>
-        </div>
-      );
-    }
-    
+    // Default to SAFE for all non-PHISHING verdicts
     return (
-      <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-950/30 border border-amber-800/50">
-        <span className="text-[12px] font-semibold text-amber-500">SUSPICIOUS</span>
+      <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-emerald-800/50">
+        <span className="text-[12px] font-semibold text-emerald-500">SAFE</span>
       </div>
     );
   };
