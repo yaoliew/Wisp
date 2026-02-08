@@ -493,6 +493,8 @@ async def wisp_screen(request: Request):
     # Step 1: Analyze transcript with Gemma
     verdict, summary = await analyze_with_gemini(transcript)
     
+    logger.info(f"Screening result for call {call_id}: verdict={verdict.value}, summary={summary}")
+    
     # Update call state with screening result (in-memory)
     screened_at = datetime.utcnow().isoformat() + "Z"
     if call_id in active_calls:
@@ -503,19 +505,34 @@ async def wisp_screen(request: Request):
     
     # Persist screening results and transcript to database
     try:
+        # First, get existing call data from database to preserve all fields
+        existing_call = await get_call(call_id)
+        
         call_record = {
             "call_id": call_id,
-            "screening_verdict": verdict.value,
-            "screening_summary": summary,
-            "screened_at": screened_at,
-            "transcript": transcript
         }
-        # Merge with existing call data if available
+        
+        # Merge with existing database data first (to preserve other fields)
+        if existing_call:
+            call_record.update(existing_call)
+            logger.debug(f"Existing call data for {call_id}: verdict={existing_call.get('screening_verdict')}")
+        
+        # Then merge with active_calls data (which may have more recent updates)
         if call_id in active_calls:
             call_record.update(active_calls[call_id])
+            logger.debug(f"After merging active_calls for {call_id}: verdict={call_record.get('screening_verdict')}")
+        
+        # CRITICAL: Set screening fields LAST to ensure they're never overwritten
+        call_record["screening_verdict"] = verdict.value
+        call_record["screening_summary"] = summary
+        call_record["screened_at"] = screened_at
+        call_record["transcript"] = transcript
+        
+        logger.info(f"Persisting call {call_id} with verdict={call_record['screening_verdict']}")
         await create_or_update_call(call_record)
+        logger.info(f"Successfully persisted call {call_id} with verdict={call_record['screening_verdict']}")
     except Exception as e:
-        logger.error(f"Failed to persist screening results to database: {e}")
+        logger.error(f"Failed to persist screening results to database: {e}", exc_info=True)
     
     # Step 2: Execute based on verdict
     if verdict == Verdict.SCAM:
@@ -752,14 +769,29 @@ async def retell_webhook(
             
             # Persist call end to database
             try:
+                # First, get existing call data from database to preserve all fields (especially screening_verdict)
+                existing_call = await get_call(call_id)
+                
                 call_record = {
                     "call_id": call_id,
                     "status": "ended",
                     "ended_at": ended_at
                 }
-                # Merge with existing call data if available
+                
+                # Merge with existing database data first (to preserve screening_verdict, etc.)
+                if existing_call:
+                    call_record.update(existing_call)
+                    logger.debug(f"Call {call_id} ended - existing verdict: {existing_call.get('screening_verdict')}")
+                
+                # Then merge with active_calls data (which may have more recent updates)
                 if call_id in active_calls:
                     call_record.update(active_calls[call_id])
+                
+                # Ensure status and ended_at are set correctly (active_calls might have overwritten)
+                call_record["status"] = "ended"
+                call_record["ended_at"] = ended_at
+                
+                logger.info(f"Persisting call_ended for {call_id} with verdict: {call_record.get('screening_verdict')}")
                 await create_or_update_call(call_record)
             except Exception as e:
                 logger.error(f"Failed to persist call_ended to database: {e}")

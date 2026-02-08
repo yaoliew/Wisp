@@ -81,19 +81,8 @@ async def create_or_update_call(call_data: Dict[str, Any]) -> bool:
         call_data["updated_at"] = now
         
         async with get_db_connection() as db:
-            await db.execute("""
-                INSERT OR REPLACE INTO calls (
-                    call_id, from_number, to_number, started_at, status,
-                    screening_verdict, screening_summary, screened_at, transcript,
-                    terminated_at, transfer_initiated, transfer_target, transfer_initiated_at,
-                    transferred_to, transferred_at, ended_at, created_at, updated_at
-                ) VALUES (
-                    :call_id, :from_number, :to_number, :started_at, :status,
-                    :screening_verdict, :screening_summary, :screened_at, :transcript,
-                    :terminated_at, :transfer_initiated, :transfer_target, :transfer_initiated_at,
-                    :transferred_to, :transferred_at, :ended_at, :created_at, :updated_at
-                )
-            """, {
+            # Prepare parameters, ensuring we don't overwrite existing verdicts with None
+            params = {
                 "call_id": call_data.get("call_id"),
                 "from_number": call_data.get("from_number"),
                 "to_number": call_data.get("to_number"),
@@ -112,7 +101,27 @@ async def create_or_update_call(call_data: Dict[str, Any]) -> bool:
                 "ended_at": call_data.get("ended_at"),
                 "created_at": call_data.get("created_at"),
                 "updated_at": call_data.get("updated_at")
-            })
+            }
+            
+            # Log verdict being saved for debugging
+            if params["screening_verdict"]:
+                logger.debug(f"Saving call {params['call_id']} with verdict: {params['screening_verdict']}")
+            elif params["screening_verdict"] is None:
+                logger.warning(f"Call {params['call_id']} being saved with NULL verdict - this may overwrite existing verdict!")
+            
+            await db.execute("""
+                INSERT OR REPLACE INTO calls (
+                    call_id, from_number, to_number, started_at, status,
+                    screening_verdict, screening_summary, screened_at, transcript,
+                    terminated_at, transfer_initiated, transfer_target, transfer_initiated_at,
+                    transferred_to, transferred_at, ended_at, created_at, updated_at
+                ) VALUES (
+                    :call_id, :from_number, :to_number, :started_at, :status,
+                    :screening_verdict, :screening_summary, :screened_at, :transcript,
+                    :terminated_at, :transfer_initiated, :transfer_target, :transfer_initiated_at,
+                    :transferred_to, :transferred_at, :ended_at, :created_at, :updated_at
+                )
+            """, params)
             await db.commit()
             return True
     except Exception as e:
