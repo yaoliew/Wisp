@@ -10,13 +10,15 @@ import hashlib
 import asyncio
 import json
 from typing import Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi import FastAPI, HTTPException, Request, Header, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import httpx
 from datetime import datetime
+from typing import Optional
 from screening import analyze_with_gemini, Verdict
-from database import init_database, create_or_update_call
+from database import init_database, create_or_update_call, get_all_calls, get_call, get_active_calls, get_stats, get_analytics_data
 
 # Load environment variables
 load_dotenv()
@@ -27,6 +29,15 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(title="Wisp Call Screening API", version="1.0.0")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:5173", "http://localhost:5174"],  # Common frontend ports
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
@@ -58,7 +69,7 @@ class ScreeningRequest(BaseModel):
 class ScreeningResponse(BaseModel):
     """Response model for call screening"""
     verdict: Verdict = Field(..., description="SCAM or SAFE verdict")
-    summary: str = Field(..., description="5-word summary of caller's intent")
+    summary: str = Field(..., description="Extremely brief summary of caller's intent")
     call_id: str = Field(..., description="Call identifier")
 
 
@@ -228,42 +239,74 @@ async def warm_transfer_retell_call(call_id: str, target_number: str, whisper_me
 
 
 @app.post("/wisp-screen", response_model=ScreeningResponse)
-async def wisp_screen(request: ScreeningRequest):
+async def wisp_screen(request: Request):
     """
     Main screening endpoint for Wisp call screening service.
     
     Analyzes call transcript with Gemma3:1b via Ollama and executes
     appropriate actions based on verdict (SCAM or SAFE).
     Works with both Custom Tool calls and webhook-driven flows.
+    
+    Accepts two request formats:
+    1. Direct format: {"call_id": "...", "transcript": "...", "metadata": {...}}
+    2. Retell Custom Tool format: {"args": {"call_id": "...", "transcript": "..."}, ...}
     """
-    logger.info(f"Received screening request for call {request.call_id}")
+    
+    # Parse request body
+    try:
+        body = await request.json()
+    except Exception as e:
+        logger.error(f"Failed to parse request body: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+    
+    # Extract call_id and transcript from either format
+    # Retell Custom Tool format: {"args": {"call_id": "...", "transcript": "..."}}
+    # Direct format: {"call_id": "...", "transcript": "..."}
+    if isinstance(body, dict) and "args" in body and isinstance(body["args"], dict):
+        # Retell Custom Tool format
+        call_id = body["args"].get("call_id")
+        transcript = body["args"].get("transcript")
+        metadata = body.get("metadata") or body["args"].get("metadata")
+    else:
+        # Direct format
+        call_id = body.get("call_id") if isinstance(body, dict) else None
+        transcript = body.get("transcript") if isinstance(body, dict) else None
+        metadata = body.get("metadata") if isinstance(body, dict) else None
+    
+    # Validate required fields
+    if not call_id:
+        raise HTTPException(status_code=422, detail="Field 'call_id' is required")
+    if not transcript:
+        raise HTTPException(status_code=422, detail="Field 'transcript' is required")
+    
+    logger.info(f"Received screening request for call {call_id}")
     
     # Check if call is in active calls (from webhook)
-    call_state = active_calls.get(request.call_id, {})
+    call_state = active_calls.get(call_id, {})
     
     # Step 1: Analyze transcript with Gemma
-    verdict, summary = await analyze_with_gemini(request.transcript)
+    verdict, summary = await analyze_with_gemini(transcript)
     
     # Update call state with screening result (in-memory)
     screened_at = datetime.utcnow().isoformat()
-    if request.call_id in active_calls:
-        active_calls[request.call_id]["screening_verdict"] = verdict.value
-        active_calls[request.call_id]["screening_summary"] = summary
-        active_calls[request.call_id]["screened_at"] = screened_at
-        active_calls[request.call_id]["transcript"] = request.transcript
+    if call_id in active_calls:
+        active_calls[call_id]["screening_verdict"] = verdict.value
+        active_calls[call_id]["screening_summary"] = summary
+        active_calls[call_id]["screened_at"] = screened_at
+        active_calls[call_id]["transcript"] = transcript
     
     # Persist screening results and transcript to database
     try:
         call_record = {
-            "call_id": request.call_id,
+            "call_id": call_id,
             "screening_verdict": verdict.value,
             "screening_summary": summary,
             "screened_at": screened_at,
-            "transcript": request.transcript
+            "transcript": transcript
         }
         # Merge with existing call data if available
-        if request.call_id in active_calls:
-            call_record.update(active_calls[request.call_id])
+        if call_id in active_calls:
+            call_record.update(active_calls[call_id])
         await create_or_update_call(call_record)
     except Exception as e:
         logger.error(f"Failed to persist screening results to database: {e}")
@@ -271,30 +314,131 @@ async def wisp_screen(request: ScreeningRequest):
     # Step 2: Execute based on verdict
     if verdict == Verdict.SCAM:
         # SCAM flow: Terminate call
-        logger.info(f"SCAM detected for call {request.call_id}. Terminating call.")
+        logger.info(f"SCAM detected for call {call_id}. Terminating call.")
         
         # Terminate call via Retell (with retry logic)
-        termination_success = await terminate_retell_call(request.call_id)
+        termination_success = await terminate_retell_call(call_id)
         if not termination_success:
-            logger.error(f"Failed to terminate call {request.call_id}")
+            logger.error(f"Failed to terminate call {call_id}")
         
     else:  # SAFE
         # SAFE flow: Warm transfer + Whisper
-        logger.info(f"SAFE call detected for call {request.call_id}. Initiating warm transfer.")
+        logger.info(f"SAFE call detected for call {call_id}. Initiating warm transfer.")
         
         # Create whisper message
         whisper_message = f"Wisp here. Verified: {summary}. Press any key to bridge."
         
         # Initiate warm transfer via Retell (with retry logic)
-        transfer_success = await warm_transfer_retell_call(request.call_id, WISP_PHONE, whisper_message)
+        transfer_success = await warm_transfer_retell_call(call_id, WISP_PHONE, whisper_message)
         if not transfer_success:
-            logger.error(f"Failed to initiate warm transfer for call {request.call_id}")
+            logger.error(f"Failed to initiate warm transfer for call {call_id}")
     
     return ScreeningResponse(
         verdict=verdict,
         summary=summary,
-        call_id=request.call_id
+        call_id=call_id
     )
+
+
+@app.get("/api/calls")
+async def get_calls_endpoint(
+    limit: Optional[int] = Query(None, description="Limit number of calls returned"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    verdict: Optional[str] = Query(None, description="Filter by screening_verdict")
+):
+    """
+    Fetch all calls with optional filters.
+    
+    Query parameters:
+    - limit: Maximum number of calls to return
+    - status: Filter by call status (e.g., 'active', 'ended')
+    - verdict: Filter by screening verdict ('SCAM', 'SAFE')
+    """
+    try:
+        calls = await get_all_calls(limit=limit, status=status, verdict=verdict)
+        return {"calls": calls, "count": len(calls)}
+    except Exception as e:
+        logger.error(f"Error fetching calls: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching calls: {str(e)}")
+
+
+@app.get("/api/calls/active")
+async def get_active_calls_endpoint():
+    """
+    Fetch currently active calls.
+    Active calls are those with status='active' or status IS NULL AND ended_at IS NULL.
+    """
+    try:
+        calls = await get_active_calls()
+        return {"calls": calls, "count": len(calls)}
+    except Exception as e:
+        logger.error(f"Error fetching active calls: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching active calls: {str(e)}")
+
+
+@app.get("/api/calls/{call_id}")
+async def get_call_endpoint(call_id: str):
+    """
+    Fetch a single call by call_id.
+    """
+    try:
+        call = await get_call(call_id)
+        if call is None:
+            raise HTTPException(status_code=404, detail=f"Call {call_id} not found")
+        return call
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching call {call_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching call: {str(e)}")
+
+
+@app.get("/api/stats")
+async def get_stats_endpoint():
+    """
+    Fetch dashboard statistics.
+    Returns:
+    - blocked_this_week: Count of SCAM verdicts in last 7 days
+    - total_protected: Total count of SCAM verdicts
+    - blocked_last_week: Count of SCAM verdicts in previous week
+    - trend_percentage: Percentage change from last week
+    """
+    try:
+        stats = await get_stats()
+        return stats
+    except Exception as e:
+        logger.error(f"Error fetching stats: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching stats: {str(e)}")
+
+
+@app.get("/api/analytics")
+async def get_analytics_endpoint(
+    period: Optional[str] = Query("daily", description="Period: daily, weekly, or monthly")
+):
+    """
+    Fetch analytics data for the analytics page.
+    
+    Query parameters:
+    - period: "daily" (default), "weekly", or "monthly"
+    
+    Returns:
+    - calls_by_period: Array of {date, count} for total calls
+    - blocked_by_period: Array of {date, count} for blocked calls (verdict='SCAM')
+    - scam_safe_ratio: {scam: count, safe: count}
+    - avg_call_duration: Average duration in seconds
+    - top_scam_categories: Array of {category, count} with fake categories
+    """
+    try:
+        if period not in ["daily", "weekly", "monthly"]:
+            raise HTTPException(status_code=400, detail="Period must be 'daily', 'weekly', or 'monthly'")
+        
+        analytics = await get_analytics_data(period)
+        return analytics
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching analytics: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching analytics: {str(e)}")
 
 
 @app.get("/health")
