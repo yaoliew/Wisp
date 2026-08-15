@@ -1,5 +1,5 @@
 # Wisp
-intent-based AI call filter
+intent-based AI call filter - https://devpost.com/software/wisp-qncb76
 
 ## Purpose
 
